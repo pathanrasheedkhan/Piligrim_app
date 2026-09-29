@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'authentication/models/user.dart';
 import 'models/group.dart';
 import 'screens/group_lobby_screen.dart';
+import 'screens/login_screen.dart';
 import 'screens/map_screen.dart';
+import 'screens/registration_screen.dart';
 import 'services/app_session_service.dart';
 import 'services/group_service.dart';
 import 'services/socket_service.dart';
@@ -10,12 +13,13 @@ import 'screens/create_group_form_screen.dart';
 import 'screens/join_group_screen.dart';
 
 void main() {
-  SocketService.instance.connect();
   runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp({this.sessionService, super.key});
+
+  final AppSessionService? sessionService;
 
   @override
   Widget build(BuildContext context) {
@@ -28,13 +32,15 @@ class MyApp extends StatelessWidget {
         ),
         scaffoldBackgroundColor: const Color(0xFFF4F7F4),
       ),
-      home: const AppStartupScreen(),
+      home: AppStartupScreen(sessionService: sessionService),
     );
   }
 }
 
 class AppStartupScreen extends StatefulWidget {
-  const AppStartupScreen({super.key});
+  const AppStartupScreen({this.sessionService, super.key});
+
+  final AppSessionService? sessionService;
 
   @override
   State<AppStartupScreen> createState() => _AppStartupScreenState();
@@ -42,10 +48,13 @@ class AppStartupScreen extends StatefulWidget {
 
 class _AppStartupScreenState extends State<AppStartupScreen> {
   bool _isRestoring = true;
+  User? _authenticatedUser;
   Group? _restoredGroup;
   bool _restoreToMap = false;
   String? _startupMessage;
   bool _canRetry = false;
+  late final AppSessionService _sessionService =
+      widget.sessionService ?? AppSessionService.instance;
 
   @override
   void initState() {
@@ -55,13 +64,24 @@ class _AppStartupScreenState extends State<AppStartupScreen> {
 
   Future<void> _restoreSession() async {
     if (mounted) setState(() => _isRestoring = true);
-    final session = await AppSessionService.instance.loadGroupSession();
+    AuthenticatedSession? authSession;
+    try {
+      authSession = await _sessionService.restoreAuthSession();
+    } catch (_) {
+      authSession = null;
+    }
+    if (!mounted) return;
+    setState(() => _authenticatedUser = authSession?.user);
+    if (authSession != null) {
+      SocketService.instance.connectAuthenticated(sessionService: _sessionService);
+    }
+
+    final session = await _sessionService.loadGroupSession();
     if (session == null) {
       if (mounted) setState(() => _isRestoring = false);
       return;
     }
 
-    SocketService.instance.connect();
     try {
       final group = await GroupService.instance.rejoinGroup(session);
       if (!mounted) return;
@@ -81,7 +101,7 @@ class _AppStartupScreenState extends State<AppStartupScreen> {
       if (invalidSession) {
         await AppSessionService.instance.clearGroupSession();
         SocketService.instance.disconnect();
-        SocketService.instance.connect();
+        SocketService.instance.connectAuthenticated();
       }
       if (!mounted) return;
       setState(() {
@@ -123,6 +143,7 @@ class _AppStartupScreenState extends State<AppStartupScreen> {
           : GroupLobbyScreen(group: group, onLeave: _returnHome);
     }
     return HomeScreen(
+      authenticatedUser: _authenticatedUser,
       message: _startupMessage,
       onRetry: _canRetry ? _restoreSession : null,
     );
@@ -130,8 +151,14 @@ class _AppStartupScreenState extends State<AppStartupScreen> {
 }
 
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({this.message, this.onRetry, super.key});
+  const HomeScreen({
+    this.authenticatedUser,
+    this.message,
+    this.onRetry,
+    super.key,
+  });
 
+  final User? authenticatedUser;
   final String? message;
   final VoidCallback? onRetry;
 
@@ -158,7 +185,9 @@ class HomeScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Stay connected on your journey.',
+                    authenticatedUser == null
+                        ? 'Stay connected on your journey.'
+                        : 'Welcome back, ${authenticatedUser!.name}.',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                       color: const Color(0xFF65736D),
@@ -225,6 +254,30 @@ class HomeScreen extends StatelessWidget {
                     ),
                     child: const Text('Join a Group'),
                   ),
+                  const SizedBox(height: 12),
+                  if (authenticatedUser == null) ...[
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (context) => const LoginScreen(),
+                          ),
+                        );
+                      },
+                      child: const Text('Log in'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (context) => const RegistrationScreen(),
+                          ),
+                        );
+                      },
+                      child: const Text('Create an account'),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -234,4 +287,3 @@ class HomeScreen extends StatelessWidget {
     );
   }
 }
-

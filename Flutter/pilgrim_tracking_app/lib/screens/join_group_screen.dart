@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/app_session_service.dart';
 import '../services/group_service.dart';
 import '../services/socket_service.dart';
 import 'group_lobby_screen.dart';
@@ -29,6 +30,10 @@ class _JoinGroupScreenState extends State<JoinGroupScreen> {
   Future<void> _joinGroup() async {
     setState(() => _joinError = null);
     if (!_formKey.currentState!.validate()) return;
+    if (AppSessionService.instance.authenticatedSession == null) {
+      setState(() => _joinError = 'Authentication required. Please sign in first.');
+      return;
+    }
 
     setState(() => _isSubmitting = true);
     try {

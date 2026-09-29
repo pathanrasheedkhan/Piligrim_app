@@ -21,8 +21,11 @@ class SocketService {
   SocketService._();
 
   static final SocketService instance = SocketService._();
+  static bool allowNetworkConnection = true;
 
   io.Socket? _socket;
+  String? _currentAuthToken;
+  String? _lastConnectionError;
   final StreamController<Map<String, dynamic>> _memberJoinedController =
       StreamController<Map<String, dynamic>>.broadcast();
   final StreamController<bool> _connectionController =
@@ -30,10 +33,10 @@ class SocketService {
   final StreamController<Map<String, MemberLocation>>
   _memberLocationsController =
       StreamController<Map<String, MemberLocation>>.broadcast();
-    final StreamController<MeetingPoint?> _meetingPointController =
+  final StreamController<MeetingPoint?> _meetingPointController =
       StreamController<MeetingPoint?>.broadcast();
   final Map<String, MemberLocation> _memberLocations = {};
-    MeetingPoint? _meetingPoint;
+  MeetingPoint? _meetingPoint;
   String? _currentUserId;
 
   Stream<Map<String, dynamic>> get memberJoined =>
@@ -47,6 +50,9 @@ class SocketService {
       Map.unmodifiable(_memberLocations);
     MeetingPoint? get meetingPoint => _meetingPoint;
   bool get isConnected => _socket?.connected ?? false;
+  Map<String, dynamic>? get connectionAuth =>
+      _currentAuthToken == null ? null : {'token': _currentAuthToken!};
+  String? get lastConnectionError => _lastConnectionError;
 
   void setCurrentUserId(String userId) {
     _currentUserId = userId;
@@ -55,10 +61,41 @@ class SocketService {
     }
   }
 
-  void connect() {
-    if (_socket != null) return;
+  bool connectAuthenticated({
+    AppSessionService? sessionService,
+    bool autoConnect = true,
+  }) {
+    final activeSession = (sessionService ?? AppSessionService.instance)
+        .authenticatedSession;
+    final token = activeSession?.token;
+    if (token == null || token.trim().isEmpty) {
+      _currentAuthToken = null;
+      _lastConnectionError = 'No authenticated session available.';
+      disconnect();
+      return false;
+    }
 
-    debugPrint('Socket connecting...');
+    final auth = {'token': token};
+    final existingSocket = _socket;
+    if (existingSocket != null) {
+      if (_currentAuthToken == token) {
+        if (existingSocket.connected) return true;
+        if (autoConnect && allowNetworkConnection) {
+          existingSocket.connect();
+        }
+        return true;
+      }
+      existingSocket.disconnect();
+      existingSocket.dispose();
+      _socket = null;
+    }
+
+    _currentAuthToken = token;
+    if (autoConnect && !allowNetworkConnection) {
+      _lastConnectionError = null;
+      return true;
+    }
+
     const serverUrl = String.fromEnvironment(
       'SOCKET_SERVER_URL',
       defaultValue: 'http://localhost:3000',
@@ -67,21 +104,23 @@ class SocketService {
       serverUrl,
       io.OptionBuilder()
           .setTransports(['websocket'])
+          .setAuth(auth)
           .disableAutoConnect()
           .build(),
     );
     _socket = socket;
+    _lastConnectionError = null;
 
     socket.onConnect((_) {
-      debugPrint('Socket connected: ${socket.id}');
+      _lastConnectionError = null;
       _connectionController.add(true);
       sendPing();
     });
-    socket.onConnectError((error) {
-      debugPrint('Socket connection error: $error');
+    socket.onConnectError((_) {
+      _lastConnectionError = 'Authentication failed or the server is unavailable.';
+      _connectionController.add(false);
     });
     socket.onDisconnect((_) {
-      debugPrint('Socket disconnected');
       _connectionController.add(false);
     });
     socket.on('pong_server', (_) {
@@ -104,19 +143,27 @@ class SocketService {
       if (data is! Map || data['userId'] is! String) return;
       final userId = data['userId'] as String;
       if (_memberLocations.remove(userId) != null) {
-        debugPrint('Member location removed: userId=$userId');
         _publishMemberLocations();
       }
     });
     socket.on('location_update_error', (data) {
       if (data is Map) {
-        debugPrint(
-          'Location update rejected: ${data['code']} ${data['message']}',
-        );
+        final code = data['code'];
+        final message = data['message'];
+        if (code is String && message is String) {
+          _lastConnectionError = 'Location update rejected.';
+        }
       }
     });
 
-    socket.connect();
+    if (autoConnect) {
+      socket.connect();
+    }
+    return true;
+  }
+
+  void connect() {
+    connectAuthenticated();
   }
 
   Future<String> getUserId() async {
@@ -128,8 +175,8 @@ class SocketService {
     if (socket == null || !socket.connected) return false;
 
     debugPrint(
-      'Sending location: userId=${payload['userId']} '
-      'groupCode=${payload['groupCode']}',
+      'Sending location: groupCode=${payload['groupCode']} '
+      'latitude=${payload['latitude']} longitude=${payload['longitude']}',
     );
     socket.emit('location_update', payload);
     return true;
@@ -195,8 +242,11 @@ class SocketService {
         'REQUEST_TIMEOUT',
         'The server did not respond. Please try again.',
       );
-    } catch (error) {
-      throw SocketServiceException('CONNECTION_ERROR', error.toString());
+    } catch (_) {
+      throw const SocketServiceException(
+        'CONNECTION_ERROR',
+        'Unable to connect to the server. Please try again.',
+      );
     }
 
     if (response is! Map) {
@@ -237,10 +287,13 @@ class SocketService {
       if (!completer.isCompleted) completer.complete();
     }
 
-    void onConnectError(dynamic error) {
+    void onConnectError(dynamic _) {
       if (!completer.isCompleted) {
         completer.completeError(
-          SocketServiceException('CONNECTION_ERROR', error.toString()),
+          const SocketServiceException(
+            'CONNECTION_ERROR',
+            'Unable to connect to the server. Please try again.',
+          ),
         );
       }
     }
@@ -279,10 +332,13 @@ class SocketService {
 
   void disconnect() {
     final socket = _socket;
+    _currentAuthToken = null;
+    _lastConnectionError = null;
     if (socket == null) return;
 
     socket.disconnect();
     socket.dispose();
     _socket = null;
+    _connectionController.add(false);
   }
 }

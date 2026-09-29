@@ -67,7 +67,7 @@ class _GroupLobbyScreenState extends State<GroupLobbyScreen> {
     await AppSessionService.instance.clearGroupSession();
     if (!mounted) return;
     SocketService.instance.disconnect();
-    SocketService.instance.connect();
+    SocketService.instance.connectAuthenticated();
     if (widget.onLeave != null) {
       widget.onLeave!();
     } else {

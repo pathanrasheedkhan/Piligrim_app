@@ -1,9 +1,45 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../authentication/models/login_response.dart';
+import '../authentication/models/user.dart';
 import '../models/group.dart';
+import 'socket_service.dart';
+
+abstract interface class SecureTokenStorage {
+  Future<String?> readToken();
+  Future<void> writeToken(String token);
+  Future<void> deleteToken();
+}
+
+class FlutterSecureTokenStorage implements SecureTokenStorage {
+  FlutterSecureTokenStorage({FlutterSecureStorage? storage})
+    : _storage = storage ?? const FlutterSecureStorage();
+
+  static const _tokenKey = 'pilgrim_tracking_auth_token';
+
+  final FlutterSecureStorage _storage;
+
+  @override
+  Future<String?> readToken() => _storage.read(key: _tokenKey);
+
+  @override
+  Future<void> writeToken(String token) =>
+      _storage.write(key: _tokenKey, value: token);
+
+  @override
+  Future<void> deleteToken() => _storage.delete(key: _tokenKey);
+}
+
+class AuthenticatedSession {
+  const AuthenticatedSession({required this.token, required this.user});
+
+  final String token;
+  final User user;
+}
 
 class SavedGroupSession {
   const SavedGroupSession({
@@ -75,12 +111,81 @@ class SavedGroupSession {
 }
 
 class AppSessionService {
-  AppSessionService._();
+  AppSessionService({SecureTokenStorage? secureTokenStorage})
+    : _secureTokenStorage = secureTokenStorage ?? FlutterSecureTokenStorage();
 
-  static final AppSessionService instance = AppSessionService._();
+  static AppSessionService? _instanceOverride;
+
+  static AppSessionService get instance {
+    return _instanceOverride ??= AppSessionService();
+  }
+
+  static set instance(AppSessionService value) => _instanceOverride = value;
 
   static const _userIdKey = 'pilgrim_tracking_user_id';
   static const _groupSessionKey = 'pilgrim_tracking_group_session';
+  static const _authUserKey = 'pilgrim_tracking_auth_user';
+
+  final SecureTokenStorage _secureTokenStorage;
+  AuthenticatedSession? _authenticatedSession;
+
+  AuthenticatedSession? get authenticatedSession => _authenticatedSession;
+  bool get isAuthenticated => _authenticatedSession != null;
+
+  Future<void> saveAuthSession(LoginResponse response) async {
+    await _secureTokenStorage.writeToken(response.token);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString(_authUserKey, jsonEncode(response.user.toJson()));
+      _authenticatedSession = AuthenticatedSession(
+        token: response.token,
+        user: response.user,
+      );
+    } catch (_) {
+      await _secureTokenStorage.deleteToken();
+      rethrow;
+    }
+  }
+
+  Future<AuthenticatedSession?> restoreAuthSession() async {
+    final token = await _secureTokenStorage.readToken();
+    final preferences = await SharedPreferences.getInstance();
+    if (token == null || token.trim().isEmpty) {
+      await preferences.remove(_authUserKey);
+      _authenticatedSession = null;
+      return null;
+    }
+
+    final encodedUser = preferences.getString(_authUserKey);
+    if (encodedUser == null) {
+      await clearAuthSession();
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(encodedUser);
+      if (decoded is! Map) throw const FormatException();
+      final user = User.fromJson(Map<String, dynamic>.from(decoded));
+      if (user.id.trim().isEmpty ||
+          user.name.trim().isEmpty ||
+          user.email.trim().isEmpty) {
+        throw const FormatException();
+      }
+      _authenticatedSession = AuthenticatedSession(token: token, user: user);
+      return _authenticatedSession;
+    } on FormatException {
+      await clearAuthSession();
+      return null;
+    }
+  }
+
+  Future<void> clearAuthSession() async {
+    await _secureTokenStorage.deleteToken();
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.remove(_authUserKey);
+    _authenticatedSession = null;
+    SocketService.instance.disconnect();
+  }
 
   Future<String> getOrCreateUserId() async {
     final preferences = await SharedPreferences.getInstance();

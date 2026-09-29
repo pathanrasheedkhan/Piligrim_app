@@ -1,3 +1,13 @@
+function resolveSocketUserId(socket) {
+  const socketUserId = typeof socket?.userId === 'string' ? socket.userId.trim() : '';
+  if (socketUserId.length === 0) {
+    const error = new Error('Authentication required');
+    error.code = 'AUTHENTICATION_REQUIRED';
+    throw error;
+  }
+  return socketUserId;
+}
+
 function registerGroupSocketHandlers(io, groupService) {
   const activeMembers = new Map();
   const socketMemberships = new Map();
@@ -5,9 +15,13 @@ function registerGroupSocketHandlers(io, groupService) {
   io.on('connection', (socket) => {
     socket.on('create_group', async (payload = {}, acknowledge) => {
       try {
-        const group = groupService.createGroup(payload);
+        const trustedUserId = resolveSocketUserId(socket);
+        const group = await groupService.createGroup({
+          ...payload,
+          userId: trustedUserId,
+        });
         await socket.join(group.groupCode);
-        associateSocket(activeMembers, socketMemberships, socket, group.groupCode, payload.userId);
+        associateSocket(activeMembers, socketMemberships, socket, group.groupCode, trustedUserId);
         socket.emit('group_created', group);
         if (typeof acknowledge === 'function') {
           acknowledge({ success: true, group });
@@ -19,14 +33,18 @@ function registerGroupSocketHandlers(io, groupService) {
 
     socket.on('join_group', async (payload = {}, acknowledge) => {
       try {
-        const result = groupService.joinGroup(payload);
+        const trustedUserId = resolveSocketUserId(socket);
+        const result = await groupService.joinGroup({
+          ...payload,
+          userId: trustedUserId,
+        });
         await socket.join(result.group.groupCode);
         associateSocket(
           activeMembers,
           socketMemberships,
           socket,
           result.group.groupCode,
-          result.member.userId,
+          trustedUserId,
         );
         if (result.memberJoined) {
           socket.to(result.group.groupCode).emit('member_joined', {
@@ -39,7 +57,7 @@ function registerGroupSocketHandlers(io, groupService) {
           groupCode: result.group.groupCode,
           locations: groupService.getMemberLocations(
             result.group.groupCode,
-            result.member.userId,
+            trustedUserId,
           ),
         });
         if (result.group.meetingPoint) {
@@ -55,21 +73,25 @@ function registerGroupSocketHandlers(io, groupService) {
 
     socket.on('rejoin_group', async (payload = {}, acknowledge) => {
       try {
-        const result = groupService.rejoinGroup(payload);
+        const trustedUserId = resolveSocketUserId(socket);
+        const result = await groupService.rejoinGroup({
+          ...payload,
+          userId: trustedUserId,
+        });
         await socket.join(result.group.groupCode);
         associateSocket(
           activeMembers,
           socketMemberships,
           socket,
           result.group.groupCode,
-          result.member.userId,
+          trustedUserId,
         );
         socket.emit('group_rejoined', result.group);
         socket.emit('group_locations', {
           groupCode: result.group.groupCode,
           locations: groupService.getMemberLocations(
             result.group.groupCode,
-            result.member.userId,
+            trustedUserId,
           ),
         });
         if (result.group.meetingPoint) {
@@ -89,10 +111,14 @@ function registerGroupSocketHandlers(io, groupService) {
 
     socket.on('location_update', (payload = {}, acknowledge) => {
       try {
-        const location = groupService.validateMemberLocation(payload);
+        const trustedUserId = resolveSocketUserId(socket);
+        const location = groupService.validateMemberLocation({
+          ...payload,
+          userId: trustedUserId,
+        });
         const isAssociated = (socketMemberships.get(socket) || []).some(
           (membership) => membership.groupCode === payload.groupCode
-            && membership.userId === payload.userId,
+            && membership.userId === trustedUserId,
         );
         if (!isAssociated || !socket.rooms.has(payload.groupCode)) {
           const error = new Error('This socket has not joined the group as this user');
@@ -117,11 +143,12 @@ function registerGroupSocketHandlers(io, groupService) {
       }
     });
 
-    socket.on('set_meeting_point', (payload = {}, acknowledge) => {
+    socket.on('set_meeting_point', async (payload = {}, acknowledge) => {
       try {
+        const trustedUserId = resolveSocketUserId(socket);
         const isAssociated = (socketMemberships.get(socket) || []).some(
           (membership) => membership.groupCode === payload.groupCode
-            && membership.userId === payload.userId,
+            && membership.userId === trustedUserId,
         );
         if (!isAssociated || !socket.rooms.has(payload.groupCode)) {
           const error = new Error('This socket has not joined the group as this user');
@@ -129,7 +156,10 @@ function registerGroupSocketHandlers(io, groupService) {
           throw error;
         }
 
-        const meetingPoint = groupService.setMeetingPoint(payload);
+        const meetingPoint = await groupService.setMeetingPoint({
+          ...payload,
+          userId: trustedUserId,
+        });
         io.to(payload.groupCode).emit('meeting_point_updated', meetingPoint);
         if (typeof acknowledge === 'function') acknowledge({ success: true, meetingPoint });
       } catch (error) {

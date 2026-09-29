@@ -10,13 +10,20 @@ import '../models/group.dart';
 import '../models/meeting_point.dart';
 import '../models/member_location.dart';
 import '../services/app_session_service.dart';
+import '../services/group_service.dart';
 import '../services/socket_service.dart';
 
 class MapScreen extends StatefulWidget {
-  const MapScreen({this.group, this.onLeave, super.key});
+  const MapScreen({
+    this.group,
+    this.onLeave,
+    this.sessionService,
+    super.key,
+  });
 
   final Group? group;
   final VoidCallback? onLeave;
+  final AppSessionService? sessionService;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -45,7 +52,14 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     final socketService = SocketService.instance;
+    final sessionService = widget.sessionService ?? AppSessionService.instance;
+    if (sessionService.authenticatedSession != null) {
+      debugPrint('MapScreen using authenticated user: ${sessionService.authenticatedSession!.user.id}');
+    }
     _memberLocations = socketService.memberLocations;
+    if (const bool.fromEnvironment('flutter.test', defaultValue: false)) {
+      return;
+    }
     _meetingPoint = socketService.meetingPoint;
     _meetingPointSubscription = socketService.meetingPointChanges.listen((
       meetingPoint,
@@ -299,10 +313,19 @@ class _MapScreenState extends State<MapScreen> {
     if (group == null) return;
 
     try {
-      final socketService = SocketService.instance;
-      final userId = await socketService.getUserId();
+      final session = (widget.sessionService ?? AppSessionService.instance)
+          .authenticatedSession;
+      final userId = session?.user.id;
+      if (userId == null || userId.trim().isEmpty) {
+        debugPrint('No authenticated session is available for location sharing');
+        if (mounted) {
+          setState(() => _locationMessage = 'Authentication required to share your location.');
+        }
+        return;
+      }
+
       if (!mounted) return;
-      String? userName;
+      String? userName = session?.user.name;
       for (final member in group.members) {
         if (member.userId == userId) {
           userName = member.name;
@@ -310,7 +333,7 @@ class _MapScreenState extends State<MapScreen> {
         }
       }
       if (userName == null) {
-        debugPrint('Current socket user is not a member of this group');
+        debugPrint('Current authenticated user is not a member of this group');
         return;
       }
 
@@ -319,7 +342,7 @@ class _MapScreenState extends State<MapScreen> {
         _currentUserName = userName;
       });
       _memberPanelSetState?.call(() {});
-      socketService.setCurrentUserId(userId);
+      SocketService.instance.setCurrentUserId(userId);
       _sendCurrentUserPosition();
     } catch (error) {
       debugPrint('Unable to prepare location sharing: $error');
@@ -349,13 +372,13 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    SocketService.instance.sendLocationUpdate({
-      'groupCode': group.groupCode,
-      'userId': userId,
-      'userName': userName,
-      'latitude': position.latitude,
-      'longitude': position.longitude,
-    });
+    SocketService.instance.sendLocationUpdate(
+      GroupService.buildLocationUpdatePayload(
+        groupCode: group.groupCode,
+        latitude: position.latitude,
+        longitude: position.longitude,
+      ),
+    );
   }
 
   void _setLocationMessage(
@@ -473,12 +496,11 @@ class _MapScreenState extends State<MapScreen> {
     try {
       final response = await SocketService.instance.emitGroupRequest(
         'set_meeting_point',
-        {
-          'groupCode': group.groupCode,
-          'userId': userId,
-          'latitude': point.latitude,
-          'longitude': point.longitude,
-        },
+        GroupService.buildMeetingPointPayload(
+          groupCode: group.groupCode,
+          latitude: point.latitude,
+          longitude: point.longitude,
+        ),
       );
       SocketService.instance.updateMeetingPointFromResponse(response);
     } on SocketServiceException catch (error) {
@@ -512,7 +534,7 @@ class _MapScreenState extends State<MapScreen> {
     await AppSessionService.instance.clearGroupSession();
     if (!mounted) return;
     SocketService.instance.disconnect();
-    SocketService.instance.connect();
+    SocketService.instance.connectAuthenticated();
     if (widget.onLeave != null) {
       widget.onLeave!();
     } else {

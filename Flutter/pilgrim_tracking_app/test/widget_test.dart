@@ -10,16 +10,48 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:pilgrim_tracking_app/authentication/models/login_response.dart';
+import 'package:pilgrim_tracking_app/authentication/models/user.dart';
 import 'package:pilgrim_tracking_app/main.dart';
 import 'package:pilgrim_tracking_app/models/group.dart';
 import 'package:pilgrim_tracking_app/screens/map_screen.dart';
 import 'package:pilgrim_tracking_app/services/app_session_service.dart';
+import 'package:pilgrim_tracking_app/services/socket_service.dart';
+
+class _FakeSecureTokenStorage implements SecureTokenStorage {
+  @override
+  Future<String?> readToken() async => null;
+
+  @override
+  Future<void> writeToken(String token) async {}
+
+  @override
+  Future<void> deleteToken() async {}
+}
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() {
+    SocketService.allowNetworkConnection = false;
+    SharedPreferences.setMockInitialValues({});
+    AppSessionService.instance = AppSessionService(
+      secureTokenStorage: _FakeSecureTokenStorage(),
+    );
+  });
+  tearDown(() {
+    SocketService.allowNetworkConnection = true;
+    AppSessionService.instance = AppSessionService(
+      secureTokenStorage: _FakeSecureTokenStorage(),
+    );
+  });
+
+  MyApp createApp() => MyApp(
+    sessionService: AppSessionService(
+      secureTokenStorage: _FakeSecureTokenStorage(),
+    ),
+  );
 
   testWidgets('Home screen shows group actions', (WidgetTester tester) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(createApp());
     await tester.pumpAndSettle();
 
     expect(find.text('Pilgrim Tracking'), findsOneWidget);
@@ -30,7 +62,7 @@ void main() {
   testWidgets('Create group validates fields and reports missing backend', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(createApp());
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Create a Group'));
@@ -53,7 +85,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('The server connection has not been initialized.'),
+      find.text('Authentication required. Please sign in first.'),
       findsOneWidget,
     );
   });
@@ -61,7 +93,7 @@ void main() {
   testWidgets('Join group validates fields and reports missing backend', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(createApp());
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Join a Group'));
@@ -83,7 +115,7 @@ void main() {
     await tester.tap(find.text('Join Group'));
     await tester.pumpAndSettle();
     expect(
-      find.text('The server connection has not been initialized.'),
+      find.text('Authentication required. Please sign in first.'),
       findsOneWidget,
     );
   });
@@ -176,5 +208,53 @@ void main() {
       ),
       findsNWidgets(3),
     );
+  });
+
+  testWidgets('Map screen resolves the current user from the authenticated session', (
+    WidgetTester tester,
+  ) async {
+    final sessionService = AppSessionService(
+      secureTokenStorage: _FakeSecureTokenStorage(),
+    );
+    AppSessionService.instance = sessionService;
+    await sessionService.saveAuthSession(
+      const LoginResponse(
+        token: 'auth-token',
+        user: User(id: 'stable-backend-uuid', name: 'Ada', email: 'ada@example.com'),
+      ),
+    );
+    final group = Group(
+      groupId: 'group-1',
+      groupCode: '123456',
+      groupName: 'Tirupati Trip',
+      maxMembers: 6,
+      members: const [
+        GroupMember(userId: 'stable-backend-uuid', name: 'Ada'),
+        GroupMember(userId: 'other-user', name: 'Sam'),
+      ],
+    );
+
+    final session = AppSessionService(
+      secureTokenStorage: _FakeSecureTokenStorage(),
+    );
+    AppSessionService.instance = session;
+    await session.saveAuthSession(
+      const LoginResponse(
+        token: 'auth-token',
+        user: User(id: 'stable-backend-uuid', name: 'Ada', email: 'ada@example.com'),
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MapScreen(group: group, sessionService: session),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Members'));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('You • Location unavailable'), findsOneWidget);
+    expect(find.text('Ada'), findsOneWidget);
   });
 }
